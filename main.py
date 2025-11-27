@@ -1,195 +1,109 @@
 import os
-import re
-import logging
-import asyncio
-from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Updater,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    Filters,
-    CallbackContext
+    filters
 )
+from telegram import Update
+from telegram.constants import ParseMode
+from dotenv import load_dotenv
 
-# ------------------------------------
-# LOAD TOKEN
-# ------------------------------------
 load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")
 
+TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN environment variable missing!")
 
+BAD_WORDS_FILE = "badwords.txt"
 
-# ------------------------------------
-# LOGGING
-# ------------------------------------
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-
-# ------------------------------------
-# POINT SYSTEM
-# ------------------------------------
-user_points = {}
-
-def add_point(uid):
-    user_points[uid] = user_points.get(uid, 0) + 1
-
-def get_rank(points):
-    if points >= 50:
-        return "⭐ Gold Member"
-    if points >= 20:
-        return "🥈 Silver Member"
-    if points >= 1:
-        return "🥉 Bronze Member"
-    return "❌ No Activity"
+# ---------------------- UTILITIES ----------------------
+def load_bad_words():
+    if not os.path.exists(BAD_WORDS_FILE):
+        return []
+    with open(BAD_WORDS_FILE, "r") as file:
+        return [w.strip() for w in file.readlines()]
 
 
-# ------------------------------------
-# BAD WORD SYSTEM
-# ------------------------------------
-BAD_WORDS = []
+def save_bad_words(words):
+    with open(BAD_WORDS_FILE, "w") as file:
+        file.write("\n".join(words))
 
 
-def add_bad(update, context):
-    if len(context.args) == 0:
-        update.message.reply_text("⚠️ ব্যবহার: /addbad শব্দ")
-        return
-
-    word = context.args[0].lower()
-    if word in BAD_WORDS:
-        update.message.reply_text("⚠️ এই শব্দ আগেই list এ আছে!")
-        return
-
-    BAD_WORDS.append(word)
-    update.message.reply_text(f"✅ `{word}` bad-word list এ যোগ হয়েছে!", parse_mode="Markdown")
+# ---------------------- COMMAND HANDLERS ----------------------
+async def rank_command(update: Update, context):
+    await update.message.reply_text("Your Rank: Member 👤")
 
 
-def del_bad(update, context):
-    if len(context.args) == 0:
-        update.message.reply_text("⚠️ ব্যবহার: /delbad শব্দ")
-        return
+async def add_bad(update: Update, context):
+    if not context.args:
+        return await update.message.reply_text("Usage: /addbad word")
 
-    word = context.args[0].lower()
-    if word not in BAD_WORDS:
-        update.message.reply_text("⚠️ এই শব্দ list এ নেই!")
-        return
+    new_word = context.args[0].lower()
+    words = load_bad_words()
 
-    BAD_WORDS.remove(word)
-    update.message.reply_text(f"🗑 `{word}` list থেকে মুছে ফেলা হয়েছে!", parse_mode="Markdown")
+    if new_word in words:
+        return await update.message.reply_text("Already exists!")
 
-
-def list_bad(update, context):
-    if not BAD_WORDS:
-        update.message.reply_text("📭 Bad word list খালি।")
-        return
-
-    words = "\n".join(f"• {w}" for w in BAD_WORDS)
-    update.message.reply_text(f"📌 **Bad Words List:**\n{words}", parse_mode="Markdown")
+    words.append(new_word)
+    save_bad_words(words)
+    await update.message.reply_text(f"Added bad word: {new_word}")
 
 
-# ------------------------------------
-# AUTO CLEAN SYSTEM (BAD WORD + LINKS)
-# ------------------------------------
-LINK_PATTERN = r"(https?://\S+|t\.me/\S+)"
+async def del_bad(update: Update, context):
+    if not context.args:
+        return await update.message.reply_text("Usage: /delbad word")
 
-def auto_clean(update, context):
-    msg = update.message
-    if not msg or not msg.text:
-        return
+    target = context.args[0].lower()
+    words = load_bad_words()
 
-    text = msg.text
-    user_id = msg.from_user.id
+    if target not in words:
+        return await update.message.reply_text("Not found!")
 
-    add_point(user_id)
+    words.remove(target)
+    save_bad_words(words)
+    await update.message.reply_text(f"Deleted: {target}")
 
-    # bad words
-    for word in BAD_WORDS:
-        if word.lower() in text.lower():
-            try:
-                msg.delete()
-            except:
-                pass
-            return
 
-    # links
-    if re.search(LINK_PATTERN, text):
+async def list_bad(update: Update, context):
+    words = load_bad_words()
+    await update.message.reply_text("\n".join(words) if words else "No bad words!")
+
+
+# ---------------------- MESSAGE HANDLER ----------------------
+async def auto_clean(update: Update, context):
+    text = update.message.text.lower()
+    words = load_bad_words()
+
+    if any(bad in text for bad in words):
         try:
-            msg.delete()
+            await update.message.delete()
         except:
             pass
         return
 
 
-# ------------------------------------
-# RANK COMMAND
-# ------------------------------------
-def rank_cmd(update, context):
-    user = update.effective_user
-    pts = user_points.get(user.id, 0)
-    rank = get_rank(pts)
-
-    update.message.reply_text(
-        f"👤 {user.first_name}\n"
-        f"📌 Points: {pts}\n"
-        f"🎖 Rank: {rank}"
-    )
+async def welcome_message(update: Update, context):
+    for member in update.message.new_chat_members:
+        await update.message.reply_text(f"Welcome {member.mention_html()}", parse_mode=ParseMode.HTML)
 
 
-# ------------------------------------
-# WELCOME MESSAGE
-# ------------------------------------
-def welcome(update, context):
-    if update.message.new_chat_members:
-        for member in update.message.new_chat_members:
-            mention = f"<a href='tg://user?id={member.id}'>{member.first_name}</a>"
-
-            msg = (
-                f"🌸 আসসালামু আলাইকুম 🌸\n\n"
-                f"{mention} 💫 আপনাকে আমাদের গ্রুপে স্বাগতম!\n\n"
-                f"📌 গ্রুপটি পিন করে রাখুন\n"
-                f"🔔 আপডেট পেতে চ্যানেলে যোগ দিন 👇"
-            )
-
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 Join Channel", url="https://t.me/CardArenaOfficial")]
-            ])
-
-            context.bot.send_message(
-                chat_id=update.message.chat_id,
-                text=msg,
-                parse_mode="HTML",
-                reply_markup=kb
-            )
-
-
-# ------------------------------------
-# MAIN
-# ------------------------------------
+# ---------------------- MAIN FUNCTION ----------------------
 def main():
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    app = ApplicationBuilder().token(TOKEN).build()
 
-    # command handlers
-    dp.add_handler(CommandHandler("rank", rank_cmd))
-    dp.add_handler(CommandHandler("addbad", add_bad))
-    dp.add_handler(CommandHandler("delbad", del_bad))
-    dp.add_handler(CommandHandler("badlist", list_bad))
+    # EVENT HANDLERS
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_clean))
 
-    # welcome
-    dp.add_handler(MessageHandler(Filters.status_update.new_chat_members, welcome))
-
-    # message filter
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, auto_clean))
+    # COMMANDS
+    app.add_handler(CommandHandler("rank", rank_command))
+    app.add_handler(CommandHandler("addbad", add_bad))
+    app.add_handler(CommandHandler("delbad", del_bad))
+    app.add_handler(CommandHandler("badlist", list_bad))
 
     print("BOT STARTED SUCCESSFULLY…")
-    updater.start_polling()
-    updater.idle()
+    app.run_polling()
 
 
 if __name__ == "__main__":
